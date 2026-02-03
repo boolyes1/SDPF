@@ -32,102 +32,70 @@ from baselines.pf import standard_pf
 from baselines.epf import extended_pf
 
 
-def load_cinn_model(config_name, device='cuda'):
-    """尝试加载 CINN 模型 (仅适用于 50D L96)"""
+def load_cinn_proposal(config_name, system):
+    """
+    使用原始 CINN_for_PF 中的 proposal_distribution 加载模型
+    """
     try:
-        from CINN_model.PCINN import PCINN
+        from CINN_for_PF import proposal_distribution
+        from Particle_filters.L96 import L96
         import os
         
-        # 模型路径映射 (基于实际文件位置)
-        # model_p_v 格式: p是观测非线性, v是噪声等级 (1=0.1, 2=0.2)
+        # 模型路径映射
         model_map = {
-            'L96-50D-σv0.1-p1': 'models_for_L96_test/model_1_1',
-            'L96-50D-σv0.1-p2': 'models_for_L96_test/model_2_1',
-            'L96-50D-σv0.2-p1': 'models_for_L96_test/model_1_2',
-            'L96-50D-σv0.2-p2': 'models_for_L96_test/model_2_2',
+            'L96-50D-σv0.1-p1': '/root/CINN_PF/models_for_L96_test/model_1_1',
+            'L96-50D-σv0.1-p2': '/root/CINN_PF/models_for_L96_test/model_2_1',
+            'L96-50D-σv0.2-p1': '/root/CINN_PF/models_for_L96_test/model_1_2',
+            'L96-50D-σv0.2-p2': '/root/CINN_PF/models_for_L96_test/model_2_2',
         }
         
-        model_dir = model_map.get(config_name)
-        full_path = f'/root/CINN_PF/{model_dir}' if model_dir else None
+        model_path = model_map.get(config_name)
+        if model_path and os.path.exists(f'{model_path}/model.pth'):
+            print(f"  [CINN] 加载预训练模型: {model_path}")
+            
+            # 创建与配置匹配的原始 L96 系统
+            sigma_v = 0.1 if 'σv0.1' in config_name else 0.2
+            p = 1 if 'p1' in config_name else 2
+            orig_sys = L96(sigma_x=0.01, sigma_v=sigma_v, sigma_e=0.01, p=p, N=50)
+            
+            # 使用原始的 proposal_distribution
+            q = proposal_distribution(orig_sys, load=model_path)
+            return q, orig_sys
         
-        if full_path and os.path.exists(f'{full_path}/model.pth'):
-            print(f"  [CINN] 加载模型: {model_dir}")
-            # 使用 load 参数直接加载模型
-            cinn = PCINN(load=full_path)
-            cinn.mod = cinn.mod.to(device)
-            # 确保内部参数也在正确设备上
-            if hasattr(cinn.mod, 'm_c'):
-                cinn.mod.m_c = cinn.mod.m_c.to(device)
-            if hasattr(cinn.mod, 'w_c'):
-                cinn.mod.w_c = cinn.mod.w_c.to(device)
-            return cinn
-        else:
-            print(f"  [CINN] 模型文件不存在: {full_path}/model.pth")
+        print(f"  [CINN] 无可用模型: {config_name}")
     except Exception as e:
         print(f"  [CINN] 加载失败: {e}")
         import traceback
         traceback.print_exc()
-    return None
+    return None, None
 
 
-def run_cinn_pf(data, system, cinn, num_particles=10, device='cuda'):
-    """运行 CINN-PF"""
-    if cinn is None:
+def run_cinn_pf(data, orig_sys, proposal, num_particles=10):
+    """
+    使用原始 CINN_for_PF 实现运行 CINN-PF
+    """
+    if proposal is None or orig_sys is None:
         return None, None
     
     try:
-        T = data['u'].shape[0]
+        from CINN_for_PF import CINN_PF
+        
+        # 转换数据格式
         y = data['y']
         if isinstance(y, torch.Tensor):
             y = y.cpu().numpy()
         
-        # 初始化
-        x = system.sample_initial(num_particles)
-        results = np.zeros((T + 1, system.dim))
-        results[0] = x.mean(axis=0)
+        u = data['u']
+        if isinstance(u, torch.Tensor):
+            u = u.cpu().numpy()
         
-        device_torch = torch.device(device)
+        # 构建原始格式的 data
+        orig_data = {'u': u, 'y': y}
         
-        for t in range(1, T + 1):
-            # 预测
-            x_pred = system.f(x)
-            
-            # CINN 采样: 条件是 [x_pred, y_t]
-            x_cond = np.hstack([x_pred, np.tile(y[t], (num_particles, 1))])
-            x_cond_t = torch.tensor(x_cond, dtype=torch.float32, device=device_torch)
-            
-            # 使用 CINN 的 sample 方法
-            with torch.no_grad():
-                x_new_t, log_q = cinn.mod.sample(x_cond_t, return_lnp=True)
-            
-            x_new = x_new_t.cpu().numpy()
-            log_q = log_q.cpu().numpy()
-            
-            # 权重
-            h_x = system.h(x_new)
-            log_like = -0.5 / (system.sigma_e ** 2) * np.sum((y[t] - h_x) ** 2, axis=1)
-            log_prior = -0.5 / (system.sigma_v ** 2) * np.sum((x_new - x_pred) ** 2, axis=1)
-            log_w = log_like + log_prior - log_q
-            
-            log_w = log_w - log_w.max()
-            w = np.exp(log_w)
-            w = np.clip(w, 1e-300, None)
-            w = w / w.sum()
-            
-            if np.isnan(w).any():
-                w = np.ones(num_particles) / num_particles
-            
-            results[t] = np.average(x_new, weights=w, axis=0)
-            
-            # 重采样
-            eff_n = 1.0 / np.sum(w ** 2)
-            if eff_n < num_particles / 2:
-                indices = np.random.choice(num_particles, num_particles, p=w)
-                x = x_new[indices]
-            else:
-                x = x_new
+        # 使用原始 CINN_PF 函数
+        x_est = CINN_PF(orig_data, orig_sys, proposal, num=num_particles)
         
-        return results, None
+        return x_est, None
     
     except Exception as e:
         print(f"  [CINN] 运行失败: {e}")
@@ -154,10 +122,12 @@ def run_method(method_name, data, system, x_true, **kwargs):
                          step_size=kwargs.get('step_size', 0.05),
                          device=device)
         elif method_name == 'CINN':
-            cinn = kwargs.get('cinn')
-            result, _ = run_cinn_pf(data, system, cinn, 
-                                    num_particles=kwargs.get('n_particles', 10), 
-                                    device=device)
+            proposal = kwargs.get('proposal')
+            orig_sys = kwargs.get('orig_sys')
+            if proposal is None or orig_sys is None:
+                return float('nan'), float('nan')
+            result, _ = run_cinn_pf(data, orig_sys, proposal, 
+                                    num_particles=kwargs.get('n_particles', 10))
             if result is None:
                 return float('nan'), float('nan')
         else:
@@ -202,10 +172,9 @@ def run_scenario(name, system, n_steps, methods_config, cinn=None):
     for method, config in methods_config.items():
         print(f"\n运行 {method} (粒子数={config.get('n_particles', 'default')})...")
         
-        config['cinn'] = cinn
         rmse, elapsed = run_method(method, data, system, x_true, **config)
         
-        if not np.isnan(rmse):
+        if not np.isnan(rmse) and not np.isinf(rmse):
             print(f"  RMSE: {rmse:.4f}, 时间: {elapsed:.2f}s")
         else:
             print(f"  失败")
@@ -254,9 +223,20 @@ def main():
     for sigma_v, p in [(0.1, 1), (0.1, 2), (0.2, 1), (0.2, 2)]:
         config_name = f'L96-50D-σv{sigma_v}-p{p}'
         sys_50d = L96System(dim=50, sigma_v=sigma_v, sigma_e=0.01, p=p)
-        cinn = load_cinn_model(config_name, device)
         
-        res = run_scenario(config_name, sys_50d, n_steps=200, methods_config=methods_50d, cinn=cinn)
+        # 加载 CINN proposal
+        proposal, orig_sys = load_cinn_proposal(config_name, sys_50d)
+        
+        # 更新方法配置以包含 proposal
+        methods_50d_with_cinn = methods_50d.copy()
+        methods_50d_with_cinn['CINN'] = {
+            'n_particles': 10, 
+            'proposal': proposal, 
+            'orig_sys': orig_sys
+        }
+        
+        res = run_scenario(config_name, sys_50d, n_steps=200, 
+                          methods_config=methods_50d_with_cinn, cinn=None)
         all_results[config_name] = res
     
     # ===== 场景 2: 高维 L96 =====
