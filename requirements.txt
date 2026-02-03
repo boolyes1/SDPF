@@ -1,0 +1,10 @@
+# SDPF 依赖 (PyTorch 版本)
+# Python >= 3.8
+
+# 核心依赖
+torch>=1.9.0
+numpy>=1.20.0
+scipy>=1.7.0
+
+# 可视化 (可选)
+matplotlib>=3.4.0
