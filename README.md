@@ -166,7 +166,7 @@ SDPF 使用**预条件化 Langevin 动力学**从后验分布采样：
 
 3. **Particle Filtering**: Doucet, A., de Freitas, N., & Gordon, N. (2001). Sequential Monte Carlo methods in practice.
 
-4.**Diffusion Model Sampling Mechanism**: Transient Chaotic Dynamics Perspective**:Bu,Y.,Lian,D.&Gao,Z.(2026).Under Review
+4. **Diffusion Model Sampling Mechanism**: Transient Chaotic Dynamics Perspective**:Bu,Y.,Lian,D.&Gao,Z.(2026).Under Review
 ---
 
 ## 📝 许可证
