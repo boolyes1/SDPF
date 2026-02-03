@@ -51,6 +51,7 @@ class FastSDPF_GPU:
         self.device = get_device(device)
         
         self.dim = system.dim
+        self.obs_dim = getattr(system, 'obs_dim', system.dim)
         self.sigma_v = system.sigma_v
         self.sigma_e = system.sigma_e
         
@@ -59,6 +60,9 @@ class FastSDPF_GPU:
         self.prec_e = torch.tensor(1.0 / (self.sigma_e ** 2), device=self.device)
         self.precond = 1.0 / (self.prec_v + self.prec_e)
         self.L = torch.sqrt(self.precond)
+        
+        # 是否稀疏观测
+        self.sparse_obs = (self.obs_dim != self.dim)
     
     @torch.no_grad()
     def run(self, data: Dict) -> torch.Tensor:
@@ -91,11 +95,26 @@ class FastSDPF_GPU:
             for _ in range(self.n_steps):
                 # Score (向量化)
                 h_x = self.system.h_torch(x_new)
-                score = -self.prec_v * (x_new - x_pred) + self.prec_e * (y_t.unsqueeze(0) - h_x)
+                obs_error = y_t.unsqueeze(0) - h_x  # (num, obs_dim)
+                
+                if self.sparse_obs:
+                    # 稀疏观测：需要将观测误差投影回状态空间
+                    # 简化处理：只对被观测的维度施加观测修正
+                    obs_score = torch.zeros(self.num, self.dim, device=self.device)
+                    if hasattr(self.system, 'obs_indices'):
+                        obs_idx = torch.tensor(self.system.obs_indices, device=self.device)
+                        obs_score[:, obs_idx] = self.prec_e * obs_error
+                    else:
+                        # 假设观测前 obs_dim 个维度
+                        obs_score[:, :self.obs_dim] = self.prec_e * obs_error
+                else:
+                    obs_score = self.prec_e * obs_error
+                
+                score = -self.prec_v * (x_new - x_pred) + obs_score
                 
                 # 更新
                 noise = torch.randn(self.num, self.dim, device=self.device)
-                x_new = x_new + step * self.precond * score + (2 * step) ** 0.5 * self.L * noise
+                x_new = x_new + step * self.precond * score + torch.sqrt(torch.tensor(2 * step, device=self.device)) * self.L * noise
                 step *= self.annealing_rate
             
             # 权重

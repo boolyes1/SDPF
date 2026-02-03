@@ -6,5 +6,14 @@
 
 from .base import BaseSystem
 from .lorenz96 import L96System
+from .narendra_li import NarendraLiSystem
+from .high_dim import HighDimL96, CoupledLorenz63, HighDimLinear
 
-__all__ = ['BaseSystem', 'L96System']
+__all__ = [
+    'BaseSystem', 
+    'L96System', 
+    'NarendraLiSystem',
+    'HighDimL96',
+    'CoupledLorenz63', 
+    'HighDimLinear'
+]
